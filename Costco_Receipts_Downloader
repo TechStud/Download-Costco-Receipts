@@ -1,0 +1,320 @@
+/**
+ * [Costco Receipts Downloader]
+ * - Download all of your Costco In-Warehouse Receipts between two dates, in JSON format.
+ *   -- You can set your own Start/End dates or accept the defaults.
+ *   -- First run will set the default Start and End dates to a max of 3 years (Costco Maximum)
+ *   -- If still logged in to Costco, subsequent runs, attempt to use the last Costco Receipt date received (temporarily stored in localStorage from the previous run) as the Start date.
+ *
+ * Usage:
+ * 1) Go to https://www.costco.com/OrderStatusCmd in your browser.
+ * 2) Log into your Costco Account.
+ * 3) Open DevTools -> Console (tab);
+ *    -> Access the developer tools in Chrome, Firefox, and Brave using a keyboard shortcut or by right-clicking on a webpage.
+ *    -> Windows / Linux  - Ctrl + Shift + I
+ *    -> macOS            - Cmd + Option + I
+ *    -> Browser          - Right-Click in the webpage, then select Inspect from the context menu that appears.
+ * 4) Paste the whole snippet below and press Enter. (or CTRL+Enter)
+ * 5) Enter the desired Start and End dates when prompted (format YYYY-MM-DD). 
+ *    -> Press Enter at each date prompt if you prefer to accept the default values.
+ *    -> NOTE: You can press Cancel to abort.
+ * 6) Once complete, you will be presented with a dialog window to save a JSON file named costco-receipts-<ISO_TIMESTAMP>.json containing all your Costco receipts in an array format (sorted oldest -> newest)
+ *
+ * IMPORTANT: 
+ *  - The downloaded JSON contains sensitive data. Treat it accordingly.
+ */
+
+(async function() {
+  console.log("[Costco Receipts Downloader] =>  Starting...")
+  const LAST_KEY = 'costcoReceiptsLastDownloaded'; // localStorage key
+  
+  function isoToMmDdYyyy(iso) {
+    // Expect iso like YYYY-MM-DD. Validate and convert.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+    const [y, m, d] = iso.split("-");
+    return `${m}/${d}/${y}`;
+  }
+
+  function askIsoDate(promptText, defaultIso) {
+    while (true) {
+      const input = prompt(promptText, defaultIso);
+      if (input === null) return null; // user cancelled
+      const trimmed = input.trim();
+      if (trimmed === "") return defaultIso;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+      alert("Invalid date format. Use YYYY-MM-DD (e.g. 2025-11-01).");
+    }
+  }
+
+  function parseReceiptDateToTime(s) {
+    if (!s) return Number.POSITIVE_INFINITY;
+    const t = Date.parse(s);
+    if (!isNaN(t)) return t;
+    const m = String(s).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ T](.*))?$/);
+    if (m) {
+      const mm = m[1].padStart(2, '0');
+      const dd = m[2].padStart(2, '0');
+      const yyyy = m[3];
+      const rest = m[4] ? 'T' + m[4] : '';
+      const iso = `${yyyy}-${mm}-${dd}${rest}`;
+      const t2 = Date.parse(iso);
+      if (!isNaN(t2)) return t2;
+    }
+    return Number.POSITIVE_INFINITY;
+  }
+
+  try {
+    const now = new Date();
+    const endDefault = now.toISOString().slice(0,10);
+    const startDateObj = new Date(now);
+    
+    // Costco provides access to 3 years MAX of available receipt data.
+    startDateObj.setFullYear(startDateObj.getFullYear() - 3);
+    startDateObj.setMonth(0);
+    startDateObj.setDate(1);
+
+    const fallbackStartDefault = startDateObj.toISOString().slice(0,10);
+    let startDefault = fallbackStartDefault;
+
+    let lastStoredIso = null;
+    try {
+      lastStoredIso = localStorage.getItem(LAST_KEY);
+    } catch (e) {
+      console.warn("[Costco Receipts Downloader] =>  Unable to read localStorage for the last Costco Receipt date key:", e);
+    }
+
+    // If we have a lastStoredIso, use the next day as the default start date to avoid duplicates.
+    if (lastStoredIso) {
+      const lastTs = parseReceiptDateToTime(lastStoredIso);
+      if (isFinite(lastTs)) {
+        const nextDay = new Date(lastTs);
+        // increment the UTC date by 1 to avoid timezone surprise
+        // nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+        nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+        startDefault = nextDay.toISOString().slice(0,10);
+        console.log(`[Costco Receipts Downloader] =>  Found last Costco Receipt date (${lastStoredIso})`);
+        console.log(`[Costco Receipts Downloader] =>  Setting default start date ${startDefault}`);
+      } else {
+        console.log(`[Costco Receipts Downloader] =>  Found last Costco Receipt date (${lastStoredIso}) but could not parse it; Using fallback start date (${fallbackStartDefault}) as default.`);
+      }
+    }
+
+    const startIso = askIsoDate(`Enter start date (YYYY-MM-DD): \n\nStart from last Costco Receipt date? ...`, startDefault);
+    if (startIso === null) { console.log("[Costco Receipts Downloader] =>  Aborted by user: Start Date"); return; } else { console.log(`[Costco Receipts Downloader] =>  Start Date Selected: ${startIso}`); }
+    
+    const startDate = isoToMmDdYyyy(startIso);
+    if (!startDate ) { console.error(`[Costco Receipts Downloader] =>  ERROR: Start Date conversion failed; (${startDate}) ensure ISO format YYYY-MM-DD.`); return; }
+
+    const endIso = askIsoDate("Enter end date (YYYY-MM-DD): [defailt: today]", endDefault);
+    if (endIso === null) { console.log("[Costco Receipts Downloader] =>  Aborted by user: End Date"); return; } 
+    console.log(`[Costco Receipts Downloader] =>  End   Date Selected: ${endIso}`); 
+
+    const endDate = isoToMmDdYyyy(endIso);
+    if (!endDate) { console.error(`[Costco Receipts Downloader] =>  ERROR: End Date conversion failed; (${endDate}) ensure ISO format YYYY-MM-DD.`); return; }
+
+    const clientID = window.localStorage.getItem('clientID');
+    const idToken = window.localStorage.getItem('idToken');
+    
+    if (!clientID || !idToken) {
+      if (!clientID) { console.error("[Costco Receipts Downloader] =>  ERROR: Ensure you are logged in on Costco site and in the Orders & Purchases page. (Missing clientID in localStorage) \nHINT: If you are logged in, try refreshing the page."); }
+      if (!idToken)  { console.error("[Costco Receipts Downloader] =>  ERROR: Ensure you are logged in on Costco site and in the Orders & Purchases page. (Missing or timed out idToken in localStorage) \nHINT: If you are logged in, try refreshing the page."); }
+      return;
+    }
+    console.log(`[Costco Receipts Downloader] =>  Found your Costco clientID and idToken.`);
+
+    let currentIdToken = idToken;
+
+    const listReceiptsQuery = {
+      query: `
+        query receipts($startDate: String!, $endDate: String!) {
+          receipts(startDate: $startDate, endDate: $endDate) {
+            documentType
+            receiptType
+            transactionType
+            transactionDateTime
+            transactionDate
+            warehouseShortName
+            warehouseNumber
+            warehouseName
+            warehouseAddress1
+            warehouseAddress2
+            warehouseCity
+            warehouseState
+            warehouseCountry
+            warehousePostalCode
+            companyNumber
+            transactionBarcode
+            totalItemCount
+            instantSavings
+            subTotal
+            taxes
+            total
+            registerNumber
+            transactionNumber
+            operatorNumber
+            membershipNumber
+            itemArray {
+              itemNumber
+              itemUPCNumber
+              itemDescription01
+              itemDescription02
+              frenchItemDescription1
+              frenchItemDescription2
+              itemIdentifier
+              itemDepartmentNumber
+              transDepartmentNumber
+              itemUnitPriceAmount
+              unit
+              amount
+              taxFlag
+              refundFlag
+              voidFlag
+              merchantID
+              entryMethod
+              fuelUnitQuantity
+              fuelUomCode
+              fuelUomDescription
+              fuelUomDescriptionFr
+              fuelGradeCode
+              fuelGradeDescription
+              fuelGradeDescriptionFr
+            }
+            couponArray {
+              couponNumber
+              upcnumberCoupon
+              associatedItemNumber
+              unitCoupon
+              amountCoupon
+              taxflagCoupon
+              voidflagCoupon
+              refundflagCoupon
+            }
+            subTaxes {
+              tax1
+              tax2
+              tax3
+              tax4
+              aTaxPercent
+              aTaxLegend
+              aTaxAmount
+              aTaxPrintCode
+              aTaxPrintCodeFR
+              aTaxIdentifierCode
+              bTaxPercent
+              bTaxLegend
+              bTaxAmount
+              bTaxPrintCode
+              bTaxPrintCodeFR
+              bTaxIdentifierCode
+              cTaxPercent
+              cTaxLegend
+              cTaxAmount
+              cTaxIdentifierCode
+              dTaxPercent
+              dTaxLegend
+              dTaxAmount
+              dTaxPrintCode
+              dTaxPrintCodeFR
+              dTaxIdentifierCode
+              uTaxLegend
+              uTaxAmount
+              uTaxableAmount
+            }
+            tenderArray {
+              tenderTypeCode
+              tenderSubTypeCode
+              tenderTypeName
+              tenderTypeNameFr
+              tenderDescription
+              amountTender
+              displayAccountNumber
+              sequenceNumber
+              approvalNumber
+              responseCode
+              transactionID
+              merchantID
+              entryMethod
+              tenderAcctTxnNumber
+              tenderAuthorizationCode
+              tenderEntryMethodDescription
+              walletType
+              walletId
+            }
+          }
+        }`.replace(/\s+/g,' '),
+      variables: { startDate: startDate, endDate: endDate }
+    };
+
+    const headers = {
+      "Content-Type": "application/json-patch+json",
+      "Costco.Env": "ecom",
+      "Costco.Service": "restOrders",
+      "Costco-X-Wcs-Clientid": clientID,
+      "Client-Identifier": "481b1aec-aa3b-454b-b81b-48187e28f205",
+      "Costco-X-Authorization": "Bearer " + currentIdToken,
+      "Accept": "application/json, text/plain, */*"
+    };
+
+    console.log(`[Costco Receipts Downloader] =>  Requesting Costco Receipts from ${startIso} -to-> ${endIso}...`);
+    const resp = await fetch("https://ecom-api.costco.com/ebusiness/order/v1/orders/graphql", {
+      method: "POST",
+      headers: headers,
+      body: JSON.stringify(listReceiptsQuery),
+      credentials: "same-origin"
+    });
+
+    if (!resp.ok) {
+      const txt = await resp.text().catch(()=>"<no body>");
+      console.error("[Costco Receipts Downloader] =>  ERROR: Request failed", resp.status, resp.statusText, txt.slice(0,1000));
+      return;
+    }
+
+    const data = await resp.json().catch(e=>{ console.error("[Costco Receipts Downloader] =>  ERROR: Failed to parse JSON response", e); return null; });
+    if (!data) return;
+    if (data.errors) {
+      console.error("[Costco Receipts Downloader] =>  ERROR: GraphQL returned errors:", data.errors);
+      return;
+    }
+
+    const receipts = (data.data && data.data.receipts) ? data.data.receipts : [];
+    
+    // Client-side sort: oldest -> newest
+    const receiptsAsc = Array.isArray(receipts) ? receipts.slice().sort((a, b) =>  {
+      const aDateStr = (a && (a.transactionDateTime || a.transactionDate)) || "";
+      const bDateStr = (b && (b.transactionDateTime || b.transactionDate)) || "";
+      const ta = parseReceiptDateToTime(aDateStr);
+      const tb = parseReceiptDateToTime(bDateStr);
+      return ta - tb;
+    }) : receipts;
+    
+    const filename = `costco-receipts-${new Date().toISOString().replace(/:/g,'-')}.json`;
+    if (Array.isArray(receiptsAsc) && receiptsAsc.length > 0) {
+      const newest = receiptsAsc[receiptsAsc.length - 1];
+      const newestDateStr = (newest && (newest.transactionDateTime || newest.transactionDate)) || "";
+      const newestTs = parseReceiptDateToTime(newestDateStr);
+      if (isFinite(newestTs)) {
+        const newestIso = new Date(newestTs).toISOString();
+        try {
+          localStorage.setItem(LAST_KEY, newestIso);
+          console.log(`[Costco Receipts Downloader] =>  Successfully updated last Costco Receipt date key (${LAST_KEY}) = ${newestIso}`);
+        } catch (e) {
+          console.warn("[Costco Receipts Downloader] =>  Could NOT update localStorage with the last Costco Receipt date:", e);
+        }
+        const blob = new Blob([JSON.stringify(receiptsAsc, null, 2)], { type: "application/json" });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        console.log(`[Costco Receipts Downloader] =>  Saved ${Array.isArray(receiptsAsc) ? receiptsAsc.length : 0} receipts to ${filename}.`);
+      } else {
+        console.warn("[Costco Receipts Downloader] =>  Could not parse newest receipt date; NOT updating the last Costco Receipt date key.");
+      }
+    } else {
+      console.error("[Costco Receipts Downloader] =>  No receipts returned; the last Costco Receipt date key was NOT modified.");
+    }
+  } catch (err) {
+    console.error("[Costco Receipts Downloader] =>  ERROR: Exception while fetching receipts:", err);
+  }
+  console.log("[Costco Receipts Downloader] =>  Finished!")
+})();
